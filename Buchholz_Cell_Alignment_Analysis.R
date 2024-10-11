@@ -1,0 +1,133 @@
+# This script will quantify cell alignment in imaged printed chips based on segmentation data from Imaris. Export Bounding box dimensions
+# in the axes of interest as csv and put them into one merged folder. Be sure that the filenaming is consistent and clear.
+
+# Load necessary packages -------------------------------------------------
+library(plyr)
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+# Read and compile your data based on file namiing ----------------------------------------------
+
+#Function to read csv files in the directory and skip the first 3 rows (Row 4 contains column headers). Adjust this number if necessary
+read_plus <- function(flnm, filename) {
+  data <- read_csv(flnm, skip = 3)
+  data$filename <- filename  # Add filename as a new column
+  return(data)
+}
+
+#Replace "YourFolderPath" by the path to the folder where you pooled all csv files.
+working_directory <- "/YourFolderPath"
+setwd(working_directory)
+
+# import bounding box length X based on "Length_X" appearing in the filename (adjust, if your imaging data was acquired in a different orientationor named differently)
+pat <- "Length_X"
+files <- list.files(path = working_directory, pattern = pat, full.names = TRUE, recursive = TRUE)
+Circumferential_Length <- ldply(Map(read_plus, files, basename(files)))
+
+# import bounding box length Z based on "Length_Z" appearing in the filename (adjust, if your imaging data was acquired in a different orientation or named differently)
+pat <- "Length_Z"
+files <- list.files(path = working_directory, pattern = pat, full.names = TRUE, recursive = TRUE)
+Longitudinal_Length <- ldply(Map(read_plus, files, basename(files)))
+
+# Combine data frames using column names
+Axis_Lengths <- cbind(Circumferential_Length[, c("BoundingBoxAA Length X", "ID")], 
+                      Longitudinal_Length[, c("BoundingBoxAA Length Z", "ID", "filename")])
+
+# Delete the second ID column
+Axis_Lengths <- subset(Axis_Lengths, select = -c(4))
+
+# Rename columns for clarity
+colnames(Axis_Lengths) <- c("Circumferential_Length", "ID",
+                            "Longitudinal_Length","Filename")
+
+# Combine Filename and ID into Unique_ID to obtain data on each cell separately
+Axis_Lengths$Unique_ID <- paste(Axis_Lengths$Filename, Axis_Lengths$ID, sep = "_")
+
+# Delete ID column
+Axis_Lengths <- subset(Axis_Lengths, select = -c(2))
+
+# Create two new columns based on Unique_ID
+Axis_Lengths$Celltype <- Axis_Lengths$Unique_ID
+Axis_Lengths$PrintOrientation <- Axis_Lengths$Unique_ID
+
+# Identify Celltype used by pattern in Unique_ID. Adapt according to your file naming
+Axis_Lengths$Celltype <- ifelse(grepl("HU", Axis_Lengths$Celltype), "HUVECs", Axis_Lengths$Celltype)
+valid_orgs <- c("HUVECs")
+Axis_Lengths$Celltype <- ifelse(Axis_Lengths$Celltype %in% valid_orgs, Axis_Lengths$Celltype, "MCF10A")
+
+# Identify print orientation based on pattern in Unique_ID. Adapt according to your file naming
+Axis_Lengths$PrintOrientation <- ifelse(grepl("Exp064", Axis_Lengths$PrintOrientation), "Horizontal", Axis_Lengths$PrintOrientation)
+Axis_Lengths$PrintOrientation <- ifelse(grepl("Exp063", Axis_Lengths$PrintOrientation), "Horizontal", Axis_Lengths$PrintOrientation)
+valid_orgs <- c("Horizontal")
+Axis_Lengths$PrintOrientation <- ifelse(Axis_Lengths$PrintOrientation %in% valid_orgs, Axis_Lengths$PrintOrientation, "Vertical")
+
+# Calculate cell alignment ------------------------------------------------
+# Create the Alignment column based on the condition
+Axis_Lengths$Alignment <- ifelse(Axis_Lengths$Longitudinal_Length > Axis_Lengths$Circumferential_Length,
+                                 "Longitudinal", "Circumferential")
+
+# Calculate the percentage of Unique_ID for which Alignment is Longitudinal for each Filename,
+# including Celltype and Orientation
+percentage_longitudinal <- Axis_Lengths %>%
+  group_by(Filename, Celltype, PrintOrientation) %>%
+  summarise(percentage_longitudinal = mean(Alignment == "Longitudinal") * 100)
+
+
+# Make the graph ----------------------------------------------------------
+# Create box plot
+ggplot(percentage_longitudinal, aes(x = paste(Celltype, PrintOrientation), y = percentage_longitudinal, fill = PrintOrientation)) +
+  geom_boxplot() +
+  labs(title = "Percentage of Unique_ID with Longitudinal Alignment",
+       x = "Celltype & Orientation",
+       y = "Percentage Longitudinal") +
+  scale_fill_manual(values = c("blue", "red")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Calculate statistical significance --------------------------------------
+# Subset the data for MCF10A Celltype
+subset_MCF10A <- subset(percentage_longitudinal, Celltype == "MCF10A")
+# Perform statistical test separately for MCF10A Celltype
+p_value_MCF10A <- t.test(percentage_longitudinal ~ PrintOrientation, data = subset_MCF10A)$p.value
+
+# Subset the data for HUVEC Celltype
+subset_HUVEC <- subset(percentage_longitudinal, Celltype == "HUVECs")
+# Perform statistical test separately for HUVEC Celltype
+p_value_HUVEC <- t.test(percentage_longitudinal ~ PrintOrientation, data = subset_HUVEC)$p.value
+
+
+# Create plot with single values and statistical indications ------------------------------------------
+# Create box plot with color based on Orientation
+p <- ggplot(percentage_longitudinal, aes(x = paste(Celltype, PrintOrientation), y = percentage_longitudinal, fill = PrintOrientation)) +
+  geom_boxplot() +
+  geom_point(aes(shape = Celltype), position = position_jitterdodge(dodge.width = 0.75), size = 3, fill = "black") +  # Map shape to Celltype
+  labs(title = "Percentage of Unique_ID with Longitudinal Alignment",
+       x = "Celltype & Orientation",
+       y = "Percentage Longitudinal") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p <- p +
+  geom_segment(data = subset_HUVEC, aes(x = 3, y = 102), 
+                                        xend = 4, yend = 102,
+               linetype = "solid", color = "black") +
+  geom_segment(data = subset_MCF10A, aes(x = 1, y = 102), 
+                                         xend = 2, yend = 102,
+               linetype = "solid", color = "black") 
+p <- p +
+  annotate("text", x = c(1.5, 3.5), 
+           y = 107, 
+           label = c(
+             ifelse(p_value_HUVEC < 0.05, ifelse(p_value_HUVEC < 0.01, ifelse(p_value_HUVEC < 0.001, ifelse(p_value_HUVEC < 0.0001, "****", "***"), "**"), "*"), "NS"), 
+             ifelse(p_value_MCF10A < 0.05, ifelse(p_value_MCF10A < 0.01, ifelse(p_value_MCF10A < 0.001, ifelse(p_value_MCF10A < 0.0001, "****", "***"), "**"), "*"), "NS")
+           ), 
+           color = c(
+             ifelse(p_value_HUVEC < 0.05, ifelse(p_value_HUVEC < 0.01, ifelse(p_value_HUVEC < 0.001, ifelse(p_value_HUVEC < 0.0001, "black", "black"), "black"), "black"), "black"), 
+             ifelse(p_value_MCF10A < 0.05, ifelse(p_value_MCF10A < 0.01, ifelse(p_value_MCF10A < 0.001, ifelse(p_value_MCF10A < 0.0001, "black", "black"), "black"), "black"), "black")
+           ), 
+           size = 6)
+
+
+p
